@@ -1,0 +1,78 @@
+# Automated publishing to pub.dev through GitHub OIDC (no stored secrets).
+# One-time setup on pub.dev: package Admin -> Automated publishing -> enable
+# GitHub Actions, repository <owner>/<this repo>, tag pattern "v{{version}}",
+# and require environment "pub.dev".
+# Release: bump version in pubspec.yaml + CHANGELOG.md, commit, then
+#   git tag v<version> && git push origin v<version>
+name: Publish to pub.dev
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Validate and run pub publish --dry-run without publishing"
+        type: boolean
+        required: false
+        default: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pub.dev
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: pkg
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - name: Verify tag matches pubspec version
+        if: github.event_name == 'push'
+        working-directory: pkg
+        run: |
+          V=$(grep "^version:" pubspec.yaml | awk '{print $2}')
+          if [ "v$V" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match pubspec version $V"
+            exit 1
+          fi
+      - name: Verify CHANGELOG entry exists for release
+        if: github.event_name == 'push' || inputs.dry_run == false
+        working-directory: pkg
+        run: |
+          V=$(grep "^version:" pubspec.yaml | awk '{print $2}')
+          if ! grep -qE "^## \[?${V}\]?([[:space:]]|$)" CHANGELOG.md; then
+            echo "Missing CHANGELOG.md heading '## $V'"
+            exit 1
+          fi
+      - name: Create isolated workspace wrapper
+        run: |
+          cat << 'EOF' > pubspec.yaml
+          name: _ci_workspace
+          publish_to: none
+          environment:
+            sdk: ^3.14.0
+          workspace:
+            - pkg
+          EOF
+      - name: Install dependencies
+        working-directory: pkg
+        run: dart pub get
+      - name: Analyze
+        working-directory: pkg
+        run: dart analyze --fatal-infos
+      - name: Run tests
+        working-directory: pkg
+        run: dart test
+      - name: Dry-run publish check
+        working-directory: pkg
+        run: dart pub publish --dry-run
+      - name: Publish to pub.dev
+        if: github.event_name == 'push' || inputs.dry_run == false
+        working-directory: pkg
+        run: dart pub publish --force
